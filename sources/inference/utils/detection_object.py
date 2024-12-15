@@ -10,23 +10,25 @@ from utils.utils import overlap_ratio
 
 import numpy as np
 
+
 class Motor:
     
     def __init__(self, bbox=None, cls_conf=-1, combine_expand=0.05) -> None:
-        """Initial for human object
+        """Initial for motor object
 
         Args:
             bbox (np.array | list): Defaults to None.
-            cls_conf (float) : None if object is not used for classification
+            cls_conf (float): None if object is not used for classification
+            combine_expand (float): Expansion factor for combined box
         """
-        self.left, self.top, self.width, self.height, self.class_id, self.conf \
-            = np.array(bbox).astype(float)
+        self.bbox = np.array(bbox).astype(float) if bbox is not None else [0, 0, 0, 0, 0, 0]
+        self.left, self.top, self.width, self.height, self.class_id, self.conf = self.bbox
         self.cls_conf = cls_conf
         self.motor_id = str(uuid.uuid4().int)
         self.human_id = None
         self.humans = []
         self.heads = []
-        self.right  = self.width + self.left
+        self.right = self.width + self.left
         self.bottom = self.height + self.top
         self.combine_expand_w = combine_expand * self.width
         self.combine_expand_h = combine_expand * self.height
@@ -39,8 +41,8 @@ class Motor:
         Returns:
             list: [motor_id, left, top, right, bottom, class_id, conf, cls_conf]
         """
-        return [self.left, self.top, self.right, self.bottom,  self.class_id, self.conf, self.cls_conf]
-        
+        return [self.left, self.top, self.right, self.bottom, self.class_id, self.conf, self.cls_conf]
+       
 
 class Human(Motor):
     

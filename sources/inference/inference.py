@@ -1,7 +1,6 @@
 # CUDA_VISIBLE_DEVICES=1 python3 inference.py --test_path /mlcv1/WorkingSpace/Personal/haov/aicity2023/Track5_2024/aicity2024_track5_train/test-set/aicity2024_track5_test/videos/
 from mmdet.apis import init_detector, inference_detector
 from mmdet.core import DatasetEnum
-import mmcv
 import cv2
 import numpy as np
 import os
@@ -32,37 +31,86 @@ def process_video(dataset, vid):
         result += process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor'])
     return result
 
-def Virtural_Expander(data: list):
+def Virtural_Expander(data: list, conf_thresh_human=0.3, conf_thresh_motor=0.5, iou_thresh=0.5):
     dataset = {}
     for line in data:
         vid, fid, left, top, width, height, cls, conf = line
-        if int(float(cls)) != 1:
-            
-            if vid not in dataset.keys():
-                dataset[vid] = {}
-            if fid not in dataset[vid].keys():
-                dataset[vid][fid] = {}
-            if 'human' not in dataset[vid][fid].keys():
-                dataset[vid][fid]['human'] = []
-            dataset[vid][fid]['human'].append(Human(bbox=[float(left), float(top), float(width), float(height),float(cls), float(conf)]))
-       
-        else:
-            if vid not in dataset.keys():
-                dataset[vid] = {}
-            if fid not in dataset[vid].keys():
-                dataset[vid][fid] = {}
-            if 'motor' not in dataset[vid][fid].keys():
-                dataset[vid][fid]['motor'] = []
-            dataset[vid][fid]['motor'].append(Motor(bbox=[float(left), float(top), float(width), float(height),float(cls), float(conf)]))
-       
-            # if 'human' not in dataset[vid][fid].keys():
-            #     dataset[vid][fid]['human'] = []
-            # dataset[vid][fid]['human'].append(Human(bbox=[float(left), float(top), float(width), float(height),float(cls), float(conf)]))
-    # Create ouput
+        conf = float(conf)
+        cls = int(float(cls))
+        
+        if conf < (conf_thresh_human if cls != 1 else conf_thresh_motor):
+            continue  # Bỏ qua những box có confidence thấp hơn ngưỡng
+        
+        if vid not in dataset:
+            dataset[vid] = {}
+        if fid not in dataset[vid]:
+            dataset[vid][fid] = {'human': [], 'motor': []}
+        
+        # Gán đối tượng vào đúng danh mục
+        if cls != 1:  # human
+            dataset[vid][fid]['human'].append(Human(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
+        else:  # motor
+            dataset[vid][fid]['motor'].append(Motor(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
+    
+    # Gộp và xử lý kết quả
     results = ''
     for vid in tqdm(dataset.keys()):
-        results += process_video(dataset, vid)
+        for fid in dataset[vid].keys():
+            # Lọc các box chồng lấn (IoU)
+            dataset[vid][fid]['human'] = apply_nms(dataset[vid][fid]['human'], iou_thresh)
+            dataset[vid][fid]['motor'] = apply_nms(dataset[vid][fid]['motor'], iou_thresh)
+            
+            # Tạo box ảo
+            results += process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor'])
     return results
+
+import numpy as np
+
+def calculate_iou(box1, box2):
+    # box format: [x1, y1, x2, y2]
+    x1_inter = max(box1[0], box2[0])
+    y1_inter = max(box1[1], box2[1])
+    x2_inter = min(box1[2], box2[2])
+    y2_inter = min(box1[3], box2[3])
+
+    inter_area = max(0, x2_inter - x1_inter) * max(0, y2_inter - y1_inter)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / union_area if union_area > 0 else 0
+
+def apply_nms(objects, iou_thresh):
+    """
+    Perform Non-Maximum Suppression (NMS) on a list of objects.
+    
+    Args:
+        objects: List of objects with format [[x1, y1, x2, y2, class_id, conf], ...]
+        iou_thresh: Intersection-over-Union threshold for suppression.
+    
+    Returns:
+        A list of filtered objects after NMS.
+    """
+    if len(objects) == 0:
+        return []
+
+    # Sort objects by confidence in descending order
+    objects = sorted(objects, key=lambda x: x.bbox[5], reverse=True)
+    keep = []
+
+    while objects:
+        # Pick the object with the highest confidence
+        current = objects.pop(0)
+        keep.append(current)
+
+        # Remove objects with IoU > iou_thresh
+        objects = [
+            obj for obj in objects
+            if calculate_iou(current.bbox[:4], obj.bbox[:4]) < iou_thresh
+        ]
+
+    return keep
+
 
 def count_samples_per_class(data):
     class_counts = [0,0,0,0,0,0,0,0,0] 
@@ -70,6 +118,7 @@ def count_samples_per_class(data):
         class_id = int(line[-2]) 
         class_counts[class_id-1] += 1
     return class_counts
+
 def find_max(classes):
     classes_count = count_samples_per_class(classes)
     max_class = max(classes_count)
@@ -81,17 +130,21 @@ def minority(p, classes):
     mean_samples = float(len(classes)/9)
     alpha = mean_samples/n_maxclass
     rare_classes = []
+
     for index, each_class in enumerate(classes_count):
         n_class = each_class
         if n_class < (n_maxclass * alpha):
             rare_classes.append(index)
-    min_thresh = 1
+
+
+    min_thresh = float('inf') # min_thresh = 1
     for each_class_index in rare_classes:
         for each_sample in classes:
             if each_class_index != int(each_sample[-2]-1):
                 continue
             if each_sample[-1] < min_thresh:
                 min_thresh = each_sample[-1]
+
     return max(min_thresh, p)
 
 def read_detections(lines: list):
@@ -130,8 +183,11 @@ def detect_video(
         lines = []
         config_file = os.path.join(config_path, config_name)
         model = init_detector(config_file, checkpoint_file, DatasetEnum.COCO, device='cuda:0')
-
+        print(test_path)
+        # print(os.listdir('/target/path/data'))
+       
         for video_name in tqdm(os.listdir(test_path)):
+            print(video_name)
             video_id = video_name.split(".")[0]
             video_path = os.path.join(test_path, video_name)
             frame_id = 0
@@ -157,7 +213,7 @@ def detect_video(
                         for i, bbox in enumerate(bbox_result)
                     ]
                     labels = np.concatenate(labels)
-                    score_thr = 0.01
+                    score_thr = 0.01 # Các giá trị ngưỡng thử nghiệm [0.01, 0.3, 0.5]
                     scores = None
                     if score_thr > 0:
                         scores = bboxes[:, -1]
@@ -183,8 +239,8 @@ def detect_video(
 def fuse(
     process_video_results: list,
     video_path: str,
-    iou_thr: float = 0.7, # default values of repo
-    skip_box_thr: float = 0.0001, # default values of repo
+    iou_thr: float = 0.7,  # Tăng từ 0.5 lên 0.7
+    skip_box_thr: float = 0.01,  # Tăng từ 0.0001 lên 0.01
 ) -> list:
     datas = [read_detections(item) for item in process_video_results]
     results = []
@@ -192,33 +248,61 @@ def fuse(
 
     for video_name in tqdm(os.listdir(video_path)):
         video_id = int(video_name.split(".")[0])
-        for frame_idx in range(1,201):
+        for frame_idx in range(1, 201):
             frame_idx = str(frame_idx)
-            boxes_list = []
-            scores_list = []
-            labels_list  = []
             weights = [1] * len(datas)
             weights[0] = 3
 
-            for data in datas:
-                data_box = []
-                score_box = []
-                label_box = []
+            # Khởi tạo dict để lưu trữ box, scores và labels theo từng lớp
+            class_boxes_dict = {}
+            class_scores_dict = {}
+            class_labels_dict = {}
+
+            # Thu thập boxes, scores và labels từ tất cả các mô hình
+            for idx, data in enumerate(datas):
                 if video_id in data and int(frame_idx) in data[video_id]:
                     for box in data[video_id][int(frame_idx)]:
-                        data_box.append(box[:4])
-                        score_box.append(box[4])
-                        label_box.append(box[5])
-                boxes_list.append(data_box)
-                scores_list.append(score_box)
-                labels_list.append(label_box)
+                        x1, y1, x2, y2 = box[:4]
+                        score = box[4]
+                        label = int(box[5])  # Đảm bảo label là số nguyên
+                        # Khởi tạo list cho lớp này nếu chưa có
+                        if label not in class_boxes_dict:
+                            class_boxes_dict[label] = [[] for _ in range(len(datas))]
+                            class_scores_dict[label] = [[] for _ in range(len(datas))]
+                            class_labels_dict[label] = [[] for _ in range(len(datas))]
+                        # Thêm dữ liệu vào lớp tương ứng
+                        class_boxes_dict[label][idx].append([x1, y1, x2, y2])
+                        class_scores_dict[label][idx].append(score)
+                        class_labels_dict[label][idx].append(label)
 
-            boxes, scores, labels = weighted_boxes_fusion(boxes_list, scores_list, labels_list, weights=weights, iou_thr=iou_thr, skip_box_thr=skip_box_thr)
-            for i in range(len(boxes)):
-                results.append([video_id, frame_idx, boxes[i][0] *w , boxes[i][1] * h, (boxes[i][2] - boxes[i][0]) * w
-                , (boxes[i][3] - boxes[i][1]) * h, labels[i], scores[i]])
+            # Áp dụng WBF riêng cho từng lớp
+            for label in class_boxes_dict.keys():
+                boxes_list = class_boxes_dict[label]
+                scores_list = class_scores_dict[label]
+                labels_list = class_labels_dict[label]
+                # Kiểm tra xem có bounding box cho lớp này không
+                if any(len(boxes) > 0 for boxes in boxes_list):
+                    # Áp dụng WBF
+                    fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
+                        boxes_list, scores_list, labels_list,
+                        weights=weights, iou_thr=iou_thr, skip_box_thr=skip_box_thr
+                    )
+                    # Thêm kết quả vào danh sách kết quả chung
+                    for i in range(len(fused_boxes)):
+                        x1, y1, x2, y2 = fused_boxes[i]
+                        results.append([
+                            video_id,
+                            frame_idx,
+                            x1 * w,
+                            y1 * h,
+                            (x2 - x1) * w,
+                            (y2 - y1) * h,
+                            fused_labels[i],
+                            fused_scores[i]
+                        ])
 
     return results
+
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(description='Inference')
@@ -226,7 +310,7 @@ if __name__ == '__main__':
     args.add_argument('--checkpoint_path', type=str, default='weights')
     args.add_argument('--config_path', type=str, default='configs')
     args.add_argument('--p', type=float, default=0.0001)
-    args.add_argument('--test_path', type=str, default='/data/aicity2024_track5_test/videos')
+    args.add_argument('--test_path', type=str)
     args = args.parse_args()
 
     p = args.p
@@ -253,5 +337,5 @@ if __name__ == '__main__':
     print("Start Virtural Expander")
     results = Virtural_Expander(results)
     
-    with open("results.txt", "w") as f:
+    with open("../../results.txt", "w") as f:
         f.write(results)
