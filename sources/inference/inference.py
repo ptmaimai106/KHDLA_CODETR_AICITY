@@ -30,41 +30,39 @@ def process_video(dataset, vid):
             dataset[vid][fid]['motor'] = []
         result += process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor'])
     return result
-
-def Virtural_Expander(data: list, conf_thresh_human=0.3, conf_thresh_motor=0.5, iou_thresh=0.5):
-    dataset = {}
-    for line in data:
-        vid, fid, left, top, width, height, cls, conf = line
-        conf = float(conf)
-        cls = int(float(cls))
-        
-        if conf < (conf_thresh_human if cls != 1 else conf_thresh_motor):
-            continue  # Bỏ qua những box có confidence thấp hơn ngưỡng
-        
-        if vid not in dataset:
-            dataset[vid] = {}
-        if fid not in dataset[vid]:
-            dataset[vid][fid] = {'human': [], 'motor': []}
-        
-        # Gán đối tượng vào đúng danh mục
-        if cls != 1:  # human
-            dataset[vid][fid]['human'].append(Human(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
-        else:  # motor
-            dataset[vid][fid]['motor'].append(Motor(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
-    
-    # Gộp và xử lý kết quả
-    results = ''
-    for vid in tqdm(dataset.keys()):
-        for fid in dataset[vid].keys():
-            # Lọc các box chồng lấn (IoU)
-            dataset[vid][fid]['human'] = apply_nms(dataset[vid][fid]['human'], iou_thresh)
-            dataset[vid][fid]['motor'] = apply_nms(dataset[vid][fid]['motor'], iou_thresh)
-            
-            # Tạo box ảo
-            results += process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor'])
-    return results
-
-import numpy as np
+#
+# def Virtural_Expander(data: list, conf_thresh_human=0.3, conf_thresh_motor=0.5, iou_thresh=0.5):
+#     dataset = {}
+#     for line in data:
+#         vid, fid, left, top, width, height, cls, conf = line
+#         conf = float(conf)
+#         cls = int(float(cls))
+#
+#         if conf < (conf_thresh_human if cls != 1 else conf_thresh_motor):
+#             continue  # Bỏ qua những box có confidence thấp hơn ngưỡng
+#
+#         if vid not in dataset:
+#             dataset[vid] = {}
+#         if fid not in dataset[vid]:
+#             dataset[vid][fid] = {'human': [], 'motor': []}
+#
+#         # Gán đối tượng vào đúng danh mục
+#         if cls != 1:  # human
+#             dataset[vid][fid]['human'].append(Human(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
+#         else:  # motor
+#             dataset[vid][fid]['motor'].append(Motor(bbox=[float(left), float(top), float(width), float(height), float(cls), conf]))
+#
+#     # Gộp và xử lý kết quả
+#     results = ''
+#     for vid in tqdm(dataset.keys()):
+#         for fid in dataset[vid].keys():
+#             # Lọc các box chồng lấn (IoU)
+#             dataset[vid][fid]['human'] = apply_nms(dataset[vid][fid]['human'], iou_thresh)
+#             dataset[vid][fid]['motor'] = apply_nms(dataset[vid][fid]['motor'], iou_thresh)
+#
+#             # Tạo box ảo
+#             results += process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor'])
+#     return results
 
 def calculate_iou(box1, box2):
     # box format: [x1, y1, x2, y2]
@@ -304,6 +302,80 @@ def fuse(
     return results
 
 
+def Virtural_Expander(data: list, conf_thresh_human=0.3, conf_thresh_motor=0.5, iou_thresh=0.5):
+    from concurrent.futures import ThreadPoolExecutor
+    from itertools import chain
+
+    def compute_iou_batch(bboxes1, bboxes2):
+        """ Compute IoU for two batches of boxes """
+        inter_x1 = np.maximum(bboxes1[:, 0], bboxes2[:, 0])
+        inter_y1 = np.maximum(bboxes1[:, 1], bboxes2[:, 1])
+        inter_x2 = np.minimum(bboxes1[:, 2], bboxes2[:, 2])
+        inter_y2 = np.minimum(bboxes1[:, 3], bboxes2[:, 3])
+
+        inter_area = np.maximum(inter_x2 - inter_x1, 0) * np.maximum(inter_y2 - inter_y1, 0)
+        area1 = (bboxes1[:, 2] - bboxes1[:, 0]) * (bboxes1[:, 3] - bboxes1[:, 1])
+        area2 = (bboxes2[:, 2] - bboxes2[:, 0]) * (bboxes2[:, 3] - bboxes2[:, 1])
+
+        union_area = area1 + area2 - inter_area
+        return inter_area / np.maximum(union_area, 1e-6)
+
+    def apply_nms(objects, iou_thresh):
+        if not objects:
+            return []
+
+        bboxes = np.array([obj.bbox[:4] for obj in objects])
+        scores = np.array([obj.bbox[5] for obj in objects])
+        indices = np.argsort(scores)[::-1]
+
+        keep = []
+        while indices.size > 0:
+            current = indices[0]
+            keep.append(objects[current])
+
+            if indices.size == 1:
+                break
+
+            rest = indices[1:]
+            ious = compute_iou_batch(bboxes[current:current + 1], bboxes[rest])
+            indices = rest[ious < iou_thresh]
+
+        return keep
+
+    dataset = {}
+    for line in data:
+        vid, fid, left, top, width, height, cls, conf = line
+        conf = float(conf)
+        cls = int(cls)
+
+        if conf < (conf_thresh_human if cls != 1 else conf_thresh_motor):
+            continue
+
+        if vid not in dataset:
+            dataset[vid] = {}
+        if fid not in dataset[vid]:
+            dataset[vid][fid] = {'human': [], 'motor': []}
+
+        obj_class = 'human' if cls != 1 else 'motor'
+        obj_instance = Human(
+            bbox=[float(left), float(top), float(width), float(height), float(cls), conf]) if cls != 1 else Motor(
+            bbox=[float(left), float(top), float(width), float(height), float(cls), conf])
+        dataset[vid][fid][obj_class].append(obj_instance)
+
+    def process_single_video(vid):
+        results = []
+        for fid in dataset[vid]:
+            dataset[vid][fid]['human'] = apply_nms(dataset[vid][fid]['human'], iou_thresh)
+            dataset[vid][fid]['motor'] = apply_nms(dataset[vid][fid]['motor'], iou_thresh)
+            results.append(process_objects(vid, fid, dataset[vid][fid]['human'], dataset[vid][fid]['motor']))
+        return results
+
+    with ThreadPoolExecutor() as executor:
+        all_results = list(chain(*executor.map(process_single_video, dataset.keys())))
+
+    return ''.join(all_results)
+
+
 if __name__ == '__main__':
     args = argparse.ArgumentParser(description='Inference')
     args.add_argument('--batch_size', type=int, default=1)
@@ -327,15 +399,10 @@ if __name__ == '__main__':
     print("Start Minority")
     minority_score = minority(p, results)
 
-    # Remove boxes with score less than minority_score
-    new_results = []
-    for result in results:
-        if result[-1] >= minority_score:
-            new_results.append(result)
-    results = new_results   
+    new_results = [result for result in results if result[-1] >= minority_score]
 
     print("Start Virtural Expander")
-    results = Virtural_Expander(results)
-    
+    results = Virtural_Expander(new_results)
+
     with open("../../results.txt", "w") as f:
         f.write(results)
